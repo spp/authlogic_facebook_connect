@@ -22,7 +22,8 @@ module AuthlogicFacebookConnect
       output << " }\n"
       output << "</script>\n"
       options.delete(:controller)
-      output << fb_login_button("connect_to_facebook()", options)
+      options.delete(:js)
+      output << fb_login(options){ 'connect_to_facebook()' }
       output
     end
   end

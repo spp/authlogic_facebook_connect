@@ -24,7 +24,31 @@ module AuthlogicFacebookConnect
         rw_config(:facebook_valid_user, value, false)
       end
       alias_method :facebook_valid_user=, :facebook_valid_user
-
+      
+      # Should the user be saved with our without validations?
+      #
+      # The default behavior is to save the user without validations and then
+      # in an application specific interface ask for the additional user
+      # details to make the user valid as facebook just provides a facebook id.
+      #
+      # This is useful if you do want to turn on user validations, maybe if you
+      # just have facebook connect as an additional authentication solution and
+      # you already have valid users.
+      #
+      # * <tt>Default:</tt> :name
+      # * <tt>Accepts:</tt> Symbol
+      def name_field(value = nil)
+        rw_config(:name_field, value, :name)
+      end
+      alias_method :name_field=, :name_field
+      
+      # * <tt>Default:</tt> :name
+      # * <tt>Accepts:</tt> Symbol
+      def email_field(value = nil)
+        rw_config(:email_field, value, :email)
+      end
+      alias_method :email_field=, :email_field
+      
       # What user field should be used for the facebook UID?
       #
       # This is useful if you want to use a single field for multiple types of
@@ -41,12 +65,12 @@ module AuthlogicFacebookConnect
       # What session key field should be used for the facebook session key
       #
       #
-      # * <tt>Default:</tt> :facebook_session_key
+      # * <tt>Default:</tt> :facebook_access_token
       # * <tt>Accepts:</tt> Symbol
-      def facebook_session_key_field(value = nil)
-        rw_config(:facebook_session_key_field, value, :facebook_session_key)
+      def facebook_access_token_field(value = nil)
+        rw_config(:facebook_access_token_field, value, :facebook_access_token)
       end
-      alias_method :facebook_session_key_field=, :facebook_session_key_field
+      alias_method :facebook_access_token_field=, :facebook_access_token_field
 
       # Class representing facebook users we want to authenticate against
       #
@@ -84,11 +108,13 @@ module AuthlogicFacebookConnect
       end
 
       def validate_by_facebook_connect
-        facebook_session = controller.facebook_session
-        self.attempted_record = facebook_user_class.find(:first, :conditions => { facebook_uid_field => facebook_session.user.uid })
-
+        current_facebook_user = controller.current_facebook_user
+        current_facebook_client = controller.current_facebook_client
+        self.attempted_record = facebook_user_class.find(:first, :conditions => { facebook_uid_field => current_facebook_user.id })
+        
+        current_facebook_user.fetch
         if self.attempted_record
-          self.attempted_record.send(:"#{facebook_session_key_field}=", facebook_session.session_key)
+          self.attempted_record.send(:"#{facebook_access_token_field}=", current_facebook_client.access_token)
           self.attempted_record.save
         end
 
@@ -101,36 +127,46 @@ module AuthlogicFacebookConnect
             new_user = klass.new
 
             if klass == facebook_user_class
-              new_user.send(:"#{facebook_uid_field}=", facebook_session.user.uid)
-              new_user.send(:"#{facebook_session_key_field}=", facebook_session.session_key)
+              new_user.send(:"#{facebook_uid_field}=", current_facebook_user.id)
+              new_user.send(:"#{facebook_access_token_field}=", current_facebook_client.access_token)
+              new_user.send(:"#{email_field}=", current_facebook_user.email)
+              new_user.send(:"#{name_field}=", "#{current_facebook_user.first_name} #{current_facebook_user.last_name}")
+              random_passwd = Authlogic::Random.friendly_token
+              new_user.password = random_passwd
+              new_user.password_confirmation = random_passwd
             else
-              new_user.send(:"build_#{facebook_user_class.to_s.underscore}", :"#{facebook_uid_field}" => facebook_session.user.uid, :"#{facebook_session_key_field}" => facebook_session.session_key)
+              new_user.send(:"build_#{facebook_user_class.to_s.underscore}", :"#{facebook_uid_field}" => current_facebook_user.id, :"#{facebook_access_token_field}" => current_facebook_client.access_token)
             end
 
-            new_user.before_connect(facebook_session) if new_user.respond_to?(:before_connect)
+            new_user.before_connect(current_facebook_user) if new_user.respond_to?(:before_connect)
 
             self.attempted_record = new_user
 
             if facebook_valid_user
-              errors.add_to_base(
-                I18n.t('error_messages.facebook_user_creation_failed',
-                       :default => 'There was a problem creating a new user ' +
-                                   'for your Facebook account')) unless self.attempted_record.valid?
-
-              self.attempted_record = nil
+              if self.attempted_record.valid?
+                self.attempted_record.save
+                self.attempted_record.activate!
+                controller.flash[:notice] = 'Thanks for connecting! We created a new account for you:'
+              else
+                controller.flash[:error] = 'There were problems with your connection. Please reconnect.'
+                errors.add_to_base(I18n.t('error_messages.facebook_user_creation_failed',
+                    :default => 'There was a problem creating a new user ' +
+                      'for your Facebook account'))
+                self.attempted_record = nil
+              end
             else
               self.attempted_record.save_with_validation(false)
             end
-          rescue Facebooker::Session::SessionExpired
+          rescue Mogli::Client::ClientException
             errors.add_to_base(I18n.t('error_messages.facebooker_session_expired',
-              :default => "Your Facebook Connect session has expired, please reconnect."))
+                :default => "Your Facebook Connect session has expired, please reconnect."))
           end
         end
       end
 
       def authenticating_with_facebook_connect?
-        controller.set_facebook_session
-        attempted_record.nil? && errors.empty? && controller.facebook_session
+        controller.fetch_client_and_user
+        attempted_record.nil? && errors.empty? && controller.current_facebook_user
       end
 
       private
@@ -142,8 +178,16 @@ module AuthlogicFacebookConnect
         self.class.facebook_uid_field
       end
 
-      def facebook_session_key_field
-        self.class.facebook_session_key_field
+      def name_field
+        self.class.name_field
+      end
+
+      def email_field
+        self.class.email_field
+      end
+
+      def facebook_access_token_field
+        self.class.facebook_access_token_field
       end
 
       def facebook_user_class
